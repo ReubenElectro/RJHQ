@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jade</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://js.puter.com/v2/"></script>
+<style>
+  :root{
+    --bg-1:#040308;
+    --red-core:#fff3e8;
+    --red-hot:#ff6a3d;
+    --red-mid:#e2123f;
+    --red-deep:#4a0713;
+    --text:#f3f0ea;
+    --muted:#8b8698;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%;}
+  body{
+    background:var(--bg-1);
+    color:var(--text);
+    font-family:'Helvetica Neue', Arial, sans-serif;
+    height:100vh;
+    overflow:hidden;
+    position:relative;
+  }
+  #orbCanvas{position:fixed; inset:0; z-index:1; cursor:pointer;}
+
+  .wordmark{
+    position:fixed; top:34px; left:50%; transform:translateX(-50%);
+    font-size:12px; letter-spacing:6px; text-transform:uppercase; color:var(--muted);
+    z-index:5; pointer-events:none;
+  }
+
+  .status{
+    position:fixed; top:calc(50% + 150px); left:50%; transform:translateX(-50%);
+    font-size:13px; letter-spacing:2px; text-transform:uppercase; color:var(--muted);
+    z-index:5; min-height:18px; transition:color .2s; pointer-events:none; text-align:center; width:100%;
+  }
+  .status.live{ color:var(--red-hot); }
+
+  .caption{
+    position:fixed; bottom:64px; left:50%; transform:translateX(-50%);
+    max-width:560px; width:88vw; text-align:center; z-index:5;
+    font-size:16px; line-height:1.55; color:var(--text);
+    opacity:0; transition:opacity .35s ease; pointer-events:none;
+  }
+  .caption.show{ opacity:1; }
+  .caption .role{
+    display:block; font-size:10.5px; letter-spacing:2.5px; text-transform:uppercase;
+    color:var(--muted); margin-bottom:8px;
+  }
+
+  .dock{
+    position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+    display:flex; gap:10px; align-items:center; z-index:6;
+  }
+  .dock button{
+    background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); color:var(--muted);
+    width:38px; height:38px; border-radius:50%; cursor:pointer; font-size:15px;
+    display:flex; align-items:center; justify-content:center; transition:all .15s;
+  }
+  .dock button:hover{ background:rgba(255,255,255,0.08); color:var(--text); }
+  .dock button.active{ border-color:rgba(226,18,63,0.6); color:var(--red-hot); }
+  #jd-file-input{ display:none; }
+
+  .unsupported{
+    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center;
+    max-width:380px; color:var(--muted); font-size:13.5px; line-height:1.6; display:none; z-index:10;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="orbCanvas"></canvas>
+<div class="wordmark">Jade</div>
+<div class="status" id="statusText">Tap Jade to talk</div>
+<div class="caption" id="caption"><span class="role" id="captionRole"></span><span id="captionText"></span></div>
+
+<div class="dock">
+  <button id="fileBtn" title="Give Jade a file to read">📎</button>
+  <button id="muteBtn" title="Mute spoken replies">🔊</button>
+</div>
+<input type="file" id="jd-file-input">
+
+<div class="unsupported" id="unsupported">
+  Jade needs voice recognition, which this browser doesn't support here.<br>
+  Try Chrome or Edge on desktop, or Chrome on Android.
+</div>
+
+<script>
+/* =========================================================
+   THREE.JS AUDIO-REACTIVE PARTICLE ORB
+   (same technique as ethanplusai/jarvis's frontend/src/orb.ts —
+   a Points cloud sphere, noise-displaced, additive glow sprites,
+   scaled/roughened live by mic + speech amplitude)
+========================================================= */
+let scene, camera, renderer, particles, particleGeo, basePositions, particleCount;
+let clock = new THREE.Clock();
+let ampTarget = 0, ampCurrent = 0;
+
+function makeGlowTexture(){
+  const size = 128;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(size/2,size/2,0,size/2,size/2,size/2);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.25, 'rgba(255,180,120,0.9)');
+  g.addColorStop(0.6, 'rgba(255,80,50,0.35)');
+  g.addColorStop(1, 'rgba(255,20,40,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,size,size);
+  return new THREE.CanvasTexture(c);
+}
+
+function initOrb(){
+  const canvas = document.getElementById('orbCanvas');
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+  camera.position.z = 6.2;
+
+  renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+
+  particleCount = 4200;
+  particleGeo = new THREE.BufferGeometry();
+  const positions = new Float32Array(particleCount*3);
+  basePositions = new Float32Array(particleCount*3);
+  const colors = new Float32Array(particleCount*3);
+  const sizes = new Float32Array(particleCount);
+
+  const colorCore = new THREE.Color('#fff3e8');
+  const colorHot  = new THREE.Color('#ff8a4d');
+  const colorMid  = new THREE.Color('#e2123f');
+  const colorDeep = new THREE.Color('#5c0f1f');
+
+  const R = 2.0;
+  for(let i=0;i<particleCount;i++){
+    // fibonacci sphere distribution for even coverage
+    const y = 1 - (i / (particleCount-1)) * 2;
+    const radiusAtY = Math.sqrt(1 - y*y);
+    const theta = Math.PI * (1 + Math.sqrt(5)) * i;
+    const x = Math.cos(theta) * radiusAtY;
+    const z = Math.sin(theta) * radiusAtY;
+
+    const jitter = 0.85 + Math.random()*0.3;
+    const px = x * R * jitter, py = y * R * jitter, pz = z * R * jitter;
+
+    positions[i*3] = px; positions[i*3+1] = py; positions[i*3+2] = pz;
+    basePositions[i*3] = x; basePositions[i*3+1] = y; basePositions[i*3+2] = z;
+
+    const t = Math.random();
+    let col;
+    if(t < 0.15) col = colorCore.clone().lerp(colorHot, Math.random());
+    else if(t < 0.55) col = colorHot.clone().lerp(colorMid, Math.random());
+    else col = colorMid.clone().lerp(colorDeep, Math.random());
+    colors[i*3]=col.r; colors[i*3+1]=col.g; colors[i*3+2]=col.b;
+
+    sizes[i] = (Math.random()*0.55 + 0.35) * 0.16;
+  }
+
+  particleGeo.setAttribute('position', new THREE.BufferAttribute(positions,3));
+  particleGeo.setAttribute('color', new THREE.BufferAttribute(colors,3));
+  particleGeo.setAttribute('size', new THREE.BufferAttribute(sizes,1));
+
+  const material = new THREE.PointsMaterial({
+    size:0.16, map:makeGlowTexture(), transparent:true, depthWrite:false,
+    vertexColors:true, blending:THREE.AdditiveBlending, sizeAttenuation:true
+  });
+
+  particles = new THREE.Points(particleGeo, material);
+  scene.add(particles);
+
+  // faint core glow sphere for extra warmth
+  const coreLight = new THREE.PointLight(0xff5a3d, 1.4, 8);
+  scene.add(coreLight);
+
+  window.addEventListener('resize', onResize);
+  animateOrb();
+}
+
+function onResize(){
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+
+// simple 3D value-noise (cheap, no external lib) for organic swirl
+function hash3(x,y,z){
+  return (Math.sin(x*12.9898 + y*78.233 + z*37.719) * 43758.5453) % 1;
+}
+function noise3(x,y,z){
+  const fx=Math.floor(x), fy=Math.floor(y), fz=Math.floor(z);
+  const dx=x-fx, dy=y-fy, dz=z-fz;
+  let sum=0, wsum=0;
+  for(let i=0;i<=1;i++)for(let j=0;j<=1;j++)for(let k=0;k<=1;k++){
+    const w=(i?dx:1-dx)*(j?dy:1-dy)*(k?dz:1-dz);
+    sum += w * hash3(fx+i, fy+j, fz+k);
+    wsum += w;
+  }
+  return sum/wsum;
+}
+
+function animateOrb(){
+  requestAnimationFrame(animateOrb);
+  const t = clock.getElapsedTime();
+
+  ampCurrent += (ampTarget - ampCurrent) * 0.12;
+
+  const pos = particleGeo.attributes.position.array;
+  const swirlSpeed = 0.18 + ampCurrent*0.5;
+  const displaceScale = 0.12 + ampCurrent*0.55;
+
+  for(let i=0;i<particleCount;i++){
+    const bx = basePositions[i*3], by = basePositions[i*3+1], bz = basePositions[i*3+2];
+    const n = noise3(bx*1.6 + t*swirlSpeed, by*1.6 + t*swirlSpeed*0.8, bz*1.6 - t*swirlSpeed*0.6);
+    const R = 2.0 + (n-0.5) * displaceScale * 2.2 + ampCurrent*0.35;
+    pos[i*3]   = bx * R;
+    pos[i*3+1] = by * R;
+    pos[i*3+2] = bz * R;
+  }
+  particleGeo.attributes.position.needsUpdate = true;
+
+  particles.rotation.y = t * 0.09;
+  particles.rotation.x = Math.sin(t*0.06) * 0.08;
+
+  const s = 1 + ampCurrent*0.12;
+  particles.scale.set(s,s,s);
+
+  renderer.render(scene, camera);
+}
+
+initOrb();
+
+/* =========================================================
+   INTERACTION (voice-only, same behaviour as before)
+========================================================= */
+let listening = false;
+let speaking = false;
+let muted = false;
+let attachedFile = null;
+let audioCtx, analyser, micStream, rafId;
+
+const statusText = document.getElementById('statusText');
+const caption = document.getElementById('caption');
+const captionRole = document.getElementById('captionRole');
+const captionText = document.getElementById('captionText');
+
+function setStatus(text, live){
+  statusText.textContent = text;
+  statusText.classList.toggle('live', !!live);
+}
+function showCaption(role, text){
+  captionRole.textContent = role;
+  captionText.textContent = text;
+  caption.classList.add('show');
+}
+function hideCaptionLater(delay){
+  clearTimeout(showCaption._t);
+  showCaption._t = setTimeout(()=> caption.classList.remove('show'), delay || 5000);
+}
+
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+if(SpeechRecognition){
+  recognition = new SpeechRecognition();
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.lang = 'en-GB';
+
+  recognition.onstart = ()=>{
+    listening = true;
+    setStatus('Listening…', true);
+    startMicVisualizer();
+  };
+  recognition.onend = ()=>{
+    listening = false;
+    stopMicVisualizer();
+    if(!speaking) setStatus('Tap Jade to talk');
+  };
+  recognition.onerror = (e)=>{
+    listening = false;
+    stopMicVisualizer();
+    if(e.error === 'no-speech') setStatus('Didn\'t catch that — tap to try again');
+    else if(e.error === 'not-allowed' || e.error === 'service-not-allowed') setStatus('Microphone blocked — allow mic access');
+    else setStatus('Tap Jade to talk');
+  };
+  recognition.onresult = (e)=>{
+    const said = e.results[0][0].transcript;
+    showCaption('You said', said);
+    handleQuestion(said);
+  };
+}else{
+  document.getElementById('unsupported').style.display = 'block';
+}
+
+document.getElementById('orbCanvas').addEventListener('click', ()=>{
+  if(!recognition) return;
+  if(speaking){ window.speechSynthesis.cancel(); speaking = false; }
+  if(listening){ recognition.stop(); return; }
+  try{ recognition.start(); }catch(e){}
+});
+
+async function startMicVisualizer(){
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(micStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    src.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    function loop(){
+      analyser.getByteFrequencyData(data);
+      const avg = data.reduce((a,b)=>a+b,0) / data.length;
+      ampTarget = Math.min(1, avg / 90);
+      rafId = requestAnimationFrame(loop);
+    }
+    loop();
+  }catch(e){}
+}
+function stopMicVisualizer(){
+  if(rafId) cancelAnimationFrame(rafId);
+  ampTarget = 0;
+  if(micStream){ micStream.getTracks().forEach(tr=>tr.stop()); micStream = null; }
+  if(audioCtx){ audioCtx.close(); audioCtx = null; }
+}
+
+function animateSpeakingAmp(durationMs){
+  const start = performance.now();
+  function loop(now){
+    if(!speaking){ ampTarget = 0; return; }
+    const t = (now-start)/1000;
+    ampTarget = (Math.sin(t*8)*0.5+0.5)*0.75 + Math.random()*0.08;
+    if(now-start < durationMs) requestAnimationFrame(loop);
+    else ampTarget = 0;
+  }
+  requestAnimationFrame(loop);
+}
+
+const fileBtn = document.getElementById('fileBtn');
+const fileInput = document.getElementById('jd-file-input');
+fileBtn.addEventListener('click', ()=> fileInput.click());
+fileInput.addEventListener('change', (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev)=>{
+    let content = ev.target.result;
+    if(typeof content !== 'string') content = '[binary file — could not read as text]';
+    if(content.length > 12000) content = content.slice(0,12000) + '\n...[truncated]';
+    attachedFile = {name:file.name, content};
+    fileBtn.classList.add('active');
+    fileBtn.title = 'Attached: ' + file.name;
+    setStatus('Got "' + file.name + '" — tap Jade to ask about it');
+  };
+  reader.readAsText(file);
+});
+
+const muteBtn = document.getElementById('muteBtn');
+muteBtn.addEventListener('click', ()=>{
+  muted = !muted;
+  muteBtn.textContent = muted ? '🔇' : '🔊';
+  muteBtn.classList.toggle('active', muted);
+  if(muted) window.speechSynthesis.cancel();
+});
+
+function extractCity(text){
+  const m = text.match(/weather (?:in|for|at)\s+([a-zA-Z\s]+)/i);
+  if(m) return m[1].trim().replace(/[?.!]$/,'');
+  if(/weather/i.test(text)) return 'Lichfield';
+  return null;
+}
+async function fetchWeather(city){
+  try{
+    const geoRes = await fetch('https://geocoding-api.open-meteo.com/v1/search?name=' + encodeURIComponent(city) + '&count=1');
+    const geo = await geoRes.json();
+    if(!geo.results || !geo.results.length) return null;
+    const loc = geo.results[0];
+    const wRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}&current=temperature_2m,wind_speed_10m,relative_humidity_2m&timezone=auto`);
+    const w = await wRes.json();
+    return {place: loc.name + (loc.country ? ', ' + loc.country : ''), temp: w.current.temperature_2m, wind: w.current.wind_speed_10m, humidity: w.current.relative_humidity_2m};
+  }catch(e){ return null; }
+}
+
+async function handleQuestion(said){
+  setStatus('Thinking…');
+  let contextBlocks = [
+    "You are Jade, a sharp, direct voice assistant. You are being spoken to out loud and your reply will be read aloud by text-to-speech, so answer conversationally in 1-4 short sentences — no markdown, no lists, nothing that only makes sense written down. Be honest and useful, never falsely flattering."
+  ];
+  if(attachedFile) contextBlocks.push(`The user has given you a file named "${attachedFile.name}" to read. Its content:\n\n${attachedFile.content}`);
+  const city = extractCity(said);
+  if(city){
+    const weather = await fetchWeather(city);
+    if(weather) contextBlocks.push(`Live weather data for ${weather.place}: ${weather.temp}°C, wind ${weather.wind} km/h, humidity ${weather.humidity}%. Use these real numbers.`);
+  }
+  // Puter.js — free, no API key, no billing on your end (usage is covered
+  // under Puter's "user-pays" model). Works from any static site, including
+  // a plain GitHub Pages deploy. First use may prompt a quick free sign-in.
+  try{
+    const reply = await puter.ai.chat(said, {
+      model: 'gpt-5.4',
+      system: contextBlocks.join('\n\n---\n\n')
+    });
+    const text = (typeof reply === 'string' ? reply : (reply?.message?.content || reply?.text || String(reply))).trim();
+    speakReply(text || "I didn't get a clean answer that time — ask me again.");
+  }catch(err){
+    speakReply("I couldn't reach the AI service just then. If a sign-in popup appeared, complete it once and ask again.");
+  }
+}
+
+function speakReply(text){
+  showCaption('Jade', text);
+  hideCaptionLater(Math.max(5000, text.length * 60));
+
+  if(muted || !('speechSynthesis' in window)){ setStatus('Tap Jade to talk'); return; }
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.rate = 1.02; utter.pitch = 1.0;
+  const voices = window.speechSynthesis.getVoices();
+  // JARVIS-style: a measured British male voice first, then any UK English, then any English at all.
+  const preferred =
+    voices.find(v=>/male/i.test(v.name) && /en-GB|UK/i.test(v.lang + v.name)) ||
+    voices.find(v=>/Daniel|Arthur|Ryan|George|Oliver/i.test(v.name)) ||
+    voices.find(v=>v.lang === 'en-GB') ||
+    voices.find(v=>v.lang && v.lang.startsWith('en'));
+  if(preferred) utter.voice = preferred;
+  utter.pitch = 0.92;
+
+  utter.onstart = ()=>{ speaking = true; setStatus('Speaking…', true); animateSpeakingAmp(Math.max(1200, text.length*55)); };
+  utter.onend = ()=>{ speaking = false; setStatus('Tap Jade to talk'); ampTarget = 0; };
+  utter.onerror = ()=>{ speaking = false; setStatus('Tap Jade to talk'); };
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utter);
+}
+if('speechSynthesis' in window){ window.speechSynthesis.onvoiceschanged = ()=> window.speechSynthesis.getVoices(); }
+</script>
+</body>
+</html>
